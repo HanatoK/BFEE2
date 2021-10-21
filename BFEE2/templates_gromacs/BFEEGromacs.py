@@ -172,6 +172,9 @@ def generateColvars(colvarsTemplate, outputPrefix, logger=None, **kwargs):
         outputPrefix (str): (no .dat extension) of the output Colvars configuration file
         logger (Logging.logger, optional): logger for debugging. Defaults to None.
         **kwargs: additional arguments passed to safe_substitute()
+    
+    Returns:
+        the filename of generated colvars configuration file
     """    
 
     #if logger is None:
@@ -188,8 +191,10 @@ def generateColvars(colvarsTemplate, outputPrefix, logger=None, **kwargs):
     #with open(colvarsTemplate, 'r', newline='\n') as finput:
     content = string.Template(colvarsTemplate)
     content = content.safe_substitute(**kwargs)
-    with open(outputPrefix + '.dat', 'w', newline='\n') as foutput:
+    filename = outputPrefix + '.dat'
+    with open(filename, 'w', newline='\n') as foutput:
         foutput.write(content)
+    return filename
 
 def generateShellScript(shellTemplate, outputPrefix, logger=None, **kwargs):
     """generate a shell script from a template
@@ -208,8 +213,10 @@ def generateShellScript(shellTemplate, outputPrefix, logger=None, **kwargs):
     #with open(shellTemplate, 'r', newline='\n') as finput:
     content = string.Template(shellTemplate)
     content = content.safe_substitute(**kwargs)
-    with open(outputPrefix + '.sh', 'w', newline='\n') as foutput:
+    filename = outputPrefix + '.sh'
+    with open(filename, 'w', newline='\n') as foutput:
         foutput.write(content)
+    return filename
 
 
 def mearsurePolarAngles(proteinCenter, ligandCenter):
@@ -542,9 +549,12 @@ class BFEEGromacs:
         self.logger.info('=' * 80)
 
 
-    def generate001(self):
+    def generate001(self, num_windows=1):
         """generate files for determining the PMF along the RMSD of the ligand  
            with respect to its bound state
+        
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][001][%(levelname)s]:%(message)s'))
@@ -576,40 +586,73 @@ class BFEEGromacs:
         # generate the index file
         self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
         # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '001_colvars')
-        generateColvars(pkg_resources.read_text(templates_gromacs, '001.colvars.template'),
-                        colvars_inputfile_basename,
-                        rmsd_bin_width=0.005,
-                        rmsd_lower_boundary=0.0,
-                        rmsd_upper_boundary=0.5,
-                        rmsd_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str,
-                        logger=self.logger)
+        total_lower_boundary = 0.0
+        total_upper_boundary = 0.5
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            self.logger.info(f'Window {window_index}: lower boundary set to {window_lower_boundary}, upper boundary set to {window_upper_boundary}')
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'001_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '001_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '001.colvars.template'),
+                colvars_inputfile_basename,
+                rmsd_bin_width=0.005,
+                rmsd_lower_boundary=window_lower_boundary,
+                rmsd_upper_boundary=window_upper_boundary,
+                rmsd_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str,
+                logger=self.logger)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # generate the shell script for making the tpr file
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '001.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '001_generate_tpr'),
-                            logger=self.logger,
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '001_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '001.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '001_generate_tpr'),
+            logger=self.logger,
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                '001_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
     
-    def generate002(self):
+    def generate002(self, num_windows=1):
         """generate files for determining the PMF along the pitch (theta) angle of
            the ligand
+        
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][002][%(levelname)s]:%(message)s'))
@@ -641,43 +684,80 @@ class BFEEGromacs:
         # generate the index file
         self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
         # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '002_colvars')
-        generateColvars(pkg_resources.read_text(templates_gromacs, '002.colvars.template'),
-                        colvars_inputfile_basename,
-                        logger=self.logger,
-                        eulerTheta_width=1,
-                        eulerTheta_lower_boundary=-10.0,
-                        eulerTheta_upper_boundary=10.0,
-                        eulerTheta_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str)
+        total_lower_boundary = -10.0
+        total_upper_boundary = 10.0
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'002_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '002_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '002.colvars.template'),
+                colvars_inputfile_basename,
+                logger=self.logger,
+                eulerTheta_width=1,
+                eulerTheta_lower_boundary=window_lower_boundary,
+                eulerTheta_upper_boundary=window_upper_boundary,
+                eulerTheta_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # generate the shell script for making the tpr file
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '002.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '002_generate_tpr'),
-                            logger=self.logger,
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '002_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '002.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '002_generate_tpr'),
+            logger=self.logger,
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '002_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         # also copy the awk script to modify the colvars configuration according to the PMF minima in previous stages
         with pkg_resources.path(templates_gromacs, 'find_min_max.awk') as p:
             shutil.copyfile(p, posixpath.join(generate_basename, 'find_min_max.awk'))
+        if num_windows > 1:
+            self.logger.warning('You are using stratified windows for BFEE step 2!')
+            self.logger.warning('The awk script automatically finds the minima and modifies the Colvars input file does not work!')
+            self.logger.warning('You will need to obtain the free-energy minima of previous step by merging stratified windows, ')
+            self.logger.warning('and then modify the Colvars input file of this step manually.')
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
 
-    def generate003(self):
+    def generate003(self, num_windows=1):
         """generate files for determining the PMF along the roll (phi) angle of
            the ligand
+        
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][003][%(levelname)s]:%(message)s'))
@@ -709,44 +789,81 @@ class BFEEGromacs:
         # generate the index file
         self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
         # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '003_colvars')
-        generateColvars(pkg_resources.read_text(templates_gromacs, '003.colvars.template'),
-                        colvars_inputfile_basename,
-                        logger=self.logger,
-                        eulerPhi_width=1,
-                        eulerPhi_lower_boundary=-10.0,
-                        eulerPhi_upper_boundary=10.0,
-                        eulerPhi_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str)
+        total_lower_boundary = -10.0
+        total_upper_boundary = 10.0
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'003_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '003_colvars')
+            colvars_filename = generateColvars(pkg_resources.read_text(templates_gromacs, '003.colvars.template'),
+                colvars_inputfile_basename,
+                logger=self.logger,
+                eulerPhi_width=1,
+                eulerPhi_lower_boundary=window_lower_boundary,
+                eulerPhi_upper_boundary=window_upper_boundary,
+                eulerPhi_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # generate the shell script for making the tpr file
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '003.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '003_generate_tpr'),
-                            logger=self.logger,
-                            BASENAME_002=self.stepnames[2],
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '003_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        # TODO
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '003.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '003_generate_tpr'),
+            logger=self.logger,
+            BASENAME_002=self.stepnames[2],
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '003_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         # also copy the awk script to modify the colvars configuration according to the PMF minima in previous stages
         with pkg_resources.path(templates_gromacs, 'find_min_max.awk') as p:
             shutil.copyfile(p, posixpath.join(generate_basename, 'find_min_max.awk'))
+        if num_windows > 1:
+            self.logger.warning('You are using stratified windows for BFEE step 3!')
+            self.logger.warning('The awk script automatically finds the minima and modifies the Colvars input file does not work!')
+            self.logger.warning('You will need to obtain the free-energy minima of previous step by merging stratified windows, ')
+            self.logger.warning('and then modify the Colvars input file of this step manually.')
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
 
-    def generate004(self):
+    def generate004(self, num_windows=1):
         """generate files for determining the PMF along the yaw (psi) angle of
            the ligand
+
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][004][%(levelname)s]:%(message)s'))
@@ -778,45 +895,82 @@ class BFEEGromacs:
         # generate the index file
         self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
         # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '004_colvars')
-        generateColvars(pkg_resources.read_text(templates_gromacs, '004.colvars.template'),
-                        colvars_inputfile_basename,
-                        logger=self.logger,
-                        eulerPsi_width=1,
-                        eulerPsi_lower_boundary=-10.0,
-                        eulerPsi_upper_boundary=10.0,
-                        eulerPsi_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str)
+        total_lower_boundary = -10.0
+        total_upper_boundary = 10.0
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'004_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '004_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '004.colvars.template'),
+                colvars_inputfile_basename,
+                logger=self.logger,
+                eulerPsi_width=1,
+                eulerPsi_lower_boundary=window_lower_boundary,
+                eulerPsi_upper_boundary=window_upper_boundary,
+                eulerPsi_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # generate the shell script for making the tpr file
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '004.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '004_generate_tpr'),
-                            logger=self.logger,
-                            BASENAME_002=self.stepnames[2],
-                            BASENAME_003=self.stepnames[3],
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '004_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '004.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '004_generate_tpr'),
+            logger=self.logger,
+            BASENAME_002=self.stepnames[2],
+            BASENAME_003=self.stepnames[3],
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '004_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         # also copy the awk script to modify the colvars configuration according to the PMF minima in previous stages
         with pkg_resources.path(templates_gromacs, 'find_min_max.awk') as p:
             shutil.copyfile(p, posixpath.join(generate_basename, 'find_min_max.awk'))
+        if num_windows > 1:
+            self.logger.warning('You are using stratified windows for BFEE step 4!')
+            self.logger.warning('The awk script automatically finds the minima and modifies the Colvars input file does not work!')
+            self.logger.warning('You will need to obtain the free-energy minima of previous step by merging stratified windows, ')
+            self.logger.warning('and then modify the Colvars input file of this step manually.')
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
 
-    def generate005(self):
+    def generate005(self, num_windows=1):
         """generate files for determining the PMF along the polar theta angle of
            the ligand relative to the protein
+
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][005][%(levelname)s]:%(message)s'))
@@ -846,9 +1000,7 @@ class BFEEGromacs:
         protein_center_str = f'({protein_center[0]}, {protein_center[1]}, {protein_center[2]})'
         self.logger.info('COM of the protein: ' + protein_center_str + '.')
         # generate the index file
-        self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
-        # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '005_colvars')
+        self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))    
         # measure the current polar theta angles
         ligand_center = measure_center(self.ligand.positions)
         ligand_center = convert(ligand_center, "angstrom", "nm")
@@ -856,48 +1008,85 @@ class BFEEGromacs:
         polar_theta, polar_phi = mearsurePolarAngles(protein_center, ligand_center)
         polar_theta_center = np.around(polar_theta, 1)
         self.logger.info(f'Measured polar angles: theta = {polar_theta:12.5f} ; phi = {polar_phi:12.5f}')
-        polar_theta_width = 1
-        polar_theta_lower = polar_theta_center - polar_theta_width * np.ceil(10 / polar_theta_width)
-        polar_theta_upper = polar_theta_center + polar_theta_width * np.ceil(10 / polar_theta_width)
-        generateColvars(pkg_resources.read_text(templates_gromacs, '005.colvars.template'),
-                        colvars_inputfile_basename,
-                        logger=self.logger,
-                        polarTheta_width=polar_theta_width,
-                        polarTheta_lower_boundary=np.around(polar_theta_lower, 2),
-                        polarTheta_upper_boundary=np.around(polar_theta_upper, 2),
-                        polarTheta_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str)
+        polar_theta_width = 1.0
+        # generate the colvars configuration
+        total_lower_boundary = np.around(polar_theta_center - polar_theta_width * np.ceil(10 / polar_theta_width), 2)
+        total_upper_boundary = np.around(polar_theta_center + polar_theta_width * np.ceil(10 / polar_theta_width), 2)
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'005_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '005_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '005.colvars.template'),
+                colvars_inputfile_basename,
+                logger=self.logger,
+                polarTheta_width=polar_theta_width,
+                polarTheta_lower_boundary=window_lower_boundary,
+                polarTheta_upper_boundary=window_upper_boundary,
+                polarTheta_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # generate the shell script for making the tpr file
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '005.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '005_generate_tpr'),
-                            logger=self.logger,
-                            BASENAME_002=self.stepnames[2],
-                            BASENAME_003=self.stepnames[3],
-                            BASENAME_004=self.stepnames[4],
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '005_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '005.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '005_generate_tpr'),
+            logger=self.logger,
+            BASENAME_002=self.stepnames[2],
+            BASENAME_003=self.stepnames[3],
+            BASENAME_004=self.stepnames[4],
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '005_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         # also copy the awk script to modify the colvars configuration according to the PMF minima in previous stages
         with pkg_resources.path(templates_gromacs, 'find_min_max.awk') as p:
             shutil.copyfile(p, posixpath.join(generate_basename, 'find_min_max.awk'))
+        if num_windows > 1:
+            self.logger.warning('You are using stratified windows for BFEE step 5!')
+            self.logger.warning('The awk script automatically finds the minima and modifies the Colvars input file does not work!')
+            self.logger.warning('You will need to obtain the free-energy minima of previous step by merging stratified windows, ')
+            self.logger.warning('and then modify the Colvars input file of this step manually.')
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
 
-    def generate006(self):
+    def generate006(self, num_windows=1):
         """generate files for determining the PMF along the polar phi angle of
            the ligand relative to the protein
+
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][006][%(levelname)s]:%(message)s'))
@@ -928,58 +1117,94 @@ class BFEEGromacs:
         self.logger.info('COM of the protein: ' + protein_center_str + '.')
         # generate the index file
         self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
-        # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '006_colvars')
         # measure the current polar theta angles
         ligand_center = measure_center(self.ligand.positions)
         ligand_center = convert(ligand_center, "angstrom", "nm")
         ligand_center_str = f'({ligand_center[0]}, {ligand_center[1]}, {ligand_center[2]})'
+        self.logger.info('COM of the ligand: ' + ligand_center_str + '.')
         polar_theta, polar_phi = mearsurePolarAngles(protein_center, ligand_center)
         polar_phi_center = np.around(polar_phi, 1)
         self.logger.info(f'Measured polar angles: theta = {polar_theta:12.5f} ; phi = {polar_phi:12.5f}')
-        polar_phi_width = 1
-        polar_phi_lower = polar_phi_center - polar_phi_width * np.ceil(10 / polar_phi_width)
-        polar_phi_upper = polar_phi_center + polar_phi_width * np.ceil(10 / polar_phi_width)
-        generateColvars(pkg_resources.read_text(templates_gromacs, '006.colvars.template'),
-                        colvars_inputfile_basename,
-                        logger=self.logger,
-                        polarPhi_width=polar_phi_width,
-                        polarPhi_lower_boundary=np.around(polar_phi_lower, 2),
-                        polarPhi_upper_boundary=np.around(polar_phi_upper, 2),
-                        polarPhi_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str)
+        polar_phi_width = 1.0
+        # generate the colvars configuration
+        total_lower_boundary = np.around(polar_phi_center - polar_phi_width * np.ceil(10 / polar_phi_width), 2)
+        total_upper_boundary = np.around(polar_phi_center + polar_phi_width * np.ceil(10 / polar_phi_width), 2)
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'006_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '006_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '006.colvars.template'),
+                colvars_inputfile_basename,
+                logger=self.logger,
+                polarPhi_width=polar_phi_width,
+                polarPhi_lower_boundary=window_lower_boundary,
+                polarPhi_upper_boundary=window_upper_boundary,
+                polarPhi_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # generate the shell script for making the tpr file
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '006.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '006_generate_tpr'),
-                            logger=self.logger,
-                            BASENAME_002=self.stepnames[2],
-                            BASENAME_003=self.stepnames[3],
-                            BASENAME_004=self.stepnames[4],
-                            BASENAME_005=self.stepnames[5],
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '006_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '006.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '006_generate_tpr'),
+            logger=self.logger,
+            BASENAME_002=self.stepnames[2],
+            BASENAME_003=self.stepnames[3],
+            BASENAME_004=self.stepnames[4],
+            BASENAME_005=self.stepnames[5],
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '006_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/000_eq/output/000_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.topologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         # also copy the awk script to modify the colvars configuration according to the PMF minima in previous stages
         with pkg_resources.path(templates_gromacs, 'find_min_max.awk') as p:
             shutil.copyfile(p, posixpath.join(generate_basename, 'find_min_max.awk'))
+        if num_windows > 1:
+            self.logger.warning('You are using stratified windows for BFEE step 6!')
+            self.logger.warning('The awk script automatically finds the minima and modifies the Colvars input file does not work!')
+            self.logger.warning('You will need to obtain the free-energy minima of previous step by merging stratified windows, ')
+            self.logger.warning('and then modify the Colvars input file of this step manually.')
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
 
-    def generate007(self):
+    def generate007(self, num_windows=1):
         """generate files for determining the PMF along the distance between the
            the ligand and the protein
+
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][007][%(levelname)s]:%(message)s'))
@@ -1042,7 +1267,6 @@ class BFEEGromacs:
         self.generateGromacsIndex(posixpath.join(generate_basename, 'colvars.ndx'))
         # generate the colvars configuration
         colvars_inputfile_basename_eq = posixpath.join(generate_basename, '007_eq_colvars')
-        colvars_inputfile_basename = posixpath.join(generate_basename, '007_colvars')
         # measure the current COM distance from the ligand to protein
         ligand_center = measure_center(self.ligand.positions)
         ligand_center = convert(ligand_center, "angstrom", "nm")
@@ -1056,14 +1280,14 @@ class BFEEGromacs:
         # r_lower_boundary = r_center - r_lower_shift
         # r_lower_shift is default to 0.2 nm
         r_lower_shift = 0.2
-        r_lower_boundary = r_center - r_lower_shift
-        if r_lower_boundary < 0:
-            r_lower_boundary = 0.0
+        total_lower_boundary = r_center - r_lower_shift
+        if total_lower_boundary < 0:
+            total_lower_boundary = 0.0
         # r_upper_boundary = r_center + r_upper_shift
         # r_upper_shift is default to 2.1 nm
         # also we will need r_upper_shift to enlarge the solvent box
         r_upper_shift = 2.1
-        r_upper_boundary = r_center + r_upper_shift
+        total_upper_boundary = r_center + r_upper_shift
         # colvars file for equilibration
         generateColvars(pkg_resources.read_text(templates_gromacs, '007_eq.colvars.template'),
                         colvars_inputfile_basename_eq,
@@ -1072,16 +1296,29 @@ class BFEEGromacs:
                         protein_selection='BFEE_Protein',
                         protein_center=protein_center_str)
         # colvars file for free-energy calculation
-        generateColvars(pkg_resources.read_text(templates_gromacs, '007.colvars.template'),
-                        colvars_inputfile_basename,
-                        logger=self.logger,
-                        r_width=r_width,
-                        r_lower_boundary=r_lower_boundary,
-                        r_upper_boundary=r_upper_boundary,
-                        r_wall_constant=0.5*4.184,
-                        ligand_selection='BFEE_Ligand',
-                        protein_selection='BFEE_Protein',
-                        protein_center=protein_center_str)
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'007_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '007_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '007.colvars.template'),
+                colvars_inputfile_basename,
+                logger=self.logger,
+                r_width=r_width,
+                r_lower_boundary=window_lower_boundary,
+                r_upper_boundary=window_upper_boundary,
+                r_wall_constant=0.5*4.184,
+                ligand_selection='BFEE_Ligand',
+                protein_selection='BFEE_Protein',
+                protein_center=protein_center_str)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file
         self.system.select_atoms('all').write(posixpath.join(generate_basename, 'reference.xyz'))
         # write the solvent molecules
@@ -1125,34 +1362,57 @@ class BFEEGromacs:
                             COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename_eq + '.dat'),
                                                                      os.path.abspath(generate_basename)).replace('\\', '/'))
         # generate shell script for free-energy calculation
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '007.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '007.2_generate_tpr'),
-                            logger=self.logger,
-                            BASENAME_002=self.stepnames[2],
-                            BASENAME_003=self.stepnames[3],
-                            BASENAME_004=self.stepnames[4],
-                            BASENAME_005=self.stepnames[5],
-                            BASENAME_006=self.stepnames[6],
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '007_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/007_r/output/007_r_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/007_r/solvated.top'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '007.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '007.2_generate_tpr'),
+            logger=self.logger,
+            BASENAME_002=self.stepnames[2],
+            BASENAME_003=self.stepnames[3],
+            BASENAME_004=self.stepnames[4],
+            BASENAME_005=self.stepnames[5],
+            BASENAME_006=self.stepnames[6],
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '007_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/007_r/output/007_r_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/007_r/solvated.top'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         # also copy the awk script to modify the colvars configuration according to the PMF minima in previous stages
         with pkg_resources.path(templates_gromacs, 'find_min_max.awk') as p:
             shutil.copyfile(p, posixpath.join(generate_basename, 'find_min_max.awk'))
+        if num_windows > 1:
+            self.logger.warning('You are using stratified windows for BFEE step 7!')
+            self.logger.warning('The awk script automatically finds the minima and modifies the Colvars input file does not work!')
+            self.logger.warning('You will need to obtain the free-energy minima of previous step by merging stratified windows, ')
+            self.logger.warning('and then modify the Colvars input file of this step manually.')
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
         self.logger.info('=' * 80)
 
-    def generate008(self):
+    def generate008(self, num_windows=1):
         """generate files for determining the PMF along the RMSD of the ligand  
            with respect to its unbound state
+
+        Args:
+            num_windows (int): the number of stratified windows
         """
 
         self.handler.setFormatter(logging.Formatter('%(asctime)s [BFEEGromacs][008][%(levelname)s]:%(message)s'))
@@ -1182,15 +1442,29 @@ class BFEEGromacs:
         if hasattr(self, 'ligandOnly'):
             self.ligandOnly.write(posixpath.join(generate_basename, 'colvars_ligand_only.ndx'), name='BFEE_Ligand_Only')
         # generate the colvars configuration
-        colvars_inputfile_basename = posixpath.join(generate_basename, '008_colvars')
-        generateColvars(pkg_resources.read_text(templates_gromacs, '008.colvars.template'),
-                        colvars_inputfile_basename,
-                        rmsd_bin_width=0.005,
-                        rmsd_lower_boundary=0.0,
-                        rmsd_upper_boundary=0.5,
-                        rmsd_wall_constant=0.8368,
-                        ligand_selection='BFEE_Ligand_Only',
-                        logger=self.logger)
+        total_lower_boundary = 0.0
+        total_upper_boundary = 0.5
+        window_size = (total_upper_boundary - total_lower_boundary) / num_windows
+        self.logger.info(f'Will use {num_windows} window(s).')
+        # save the colvars filename in a list for further use with GROMACS
+        colvars_input_file_list = list()
+        for window_index in range(0, num_windows):
+            window_lower_boundary = total_lower_boundary + window_index * window_size
+            window_upper_boundary = total_lower_boundary + (window_index + 1) * window_size
+            if num_windows > 1:
+                colvars_inputfile_basename = posixpath.join(generate_basename, f'008_colvars.win{window_index}')
+            else:
+                colvars_inputfile_basename = posixpath.join(generate_basename, '008_colvars')
+            colvars_filename = generateColvars(
+                pkg_resources.read_text(templates_gromacs, '008.colvars.template'),
+                colvars_inputfile_basename,
+                rmsd_bin_width=0.005,
+                rmsd_lower_boundary=window_lower_boundary,
+                rmsd_upper_boundary=window_upper_boundary,
+                rmsd_wall_constant=0.8368,
+                ligand_selection='BFEE_Ligand_Only',
+                logger=self.logger)
+            colvars_input_file_list.append(colvars_filename)
         # generate the reference file for ligand only
         # extract the positions from the host-guest binding system
         ligand_position_in_system = self.ligand.positions
@@ -1210,18 +1484,33 @@ class BFEEGromacs:
                             TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.ligandOnlyTopologyFile),
                                                                 os.path.abspath(generate_basename)).replace('\\', '/'),)
         # generate the shell script for making the tpr file for free-energy calculation
-        generateShellScript(pkg_resources.read_text(templates_gromacs, '008.generate_tpr_sh.template'),
-                            posixpath.join(generate_basename, '008.2_generate_tpr'),
-                            logger=self.logger,
-                            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
-                                                                                                 '008_PMF.mdp')),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/008_RMSD_unbound/output/008_RMSD_unbound_eq.out.gro'),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.ligandOnlyTopologyFile),
-                                                                os.path.abspath(generate_basename)).replace('\\', '/'),
-                            COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_inputfile_basename + '.dat'),
-                                                                     os.path.abspath(generate_basename)).replace('\\', '/'))
+        shell_script_file = generateShellScript(
+            pkg_resources.read_text(templates_gromacs, '008.generate_tpr_sh.template'),
+            posixpath.join(generate_basename, '008.2_generate_tpr'),
+            logger=self.logger,
+            MDP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(posixpath.join(generate_basename,
+                                                                                    '008_PMF.mdp')),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            GRO_FILE_TEMPLATE=os.path.relpath(os.path.abspath(f'{self.baseDirectory}/008_RMSD_unbound/output/008_RMSD_unbound_eq.out.gro'),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'),
+            TOP_FILE_TEMPLATE=os.path.relpath(os.path.abspath(self.ligandOnlyTopologyFile),
+                                                os.path.abspath(generate_basename)).replace('\\', '/'))
+        # append the shell script with running command(s)
+        with open(shell_script_file, 'a', newline='\n') as shell_script:
+            for window_index, colvars_input_file in enumerate(colvars_input_file_list):
+                command_template = string.Template(pkg_resources.read_text(templates_gromacs, 'run_gmx_command.template'))
+                if num_windows > 1:
+                    command_str = command_template.safe_substitute(
+                        DEFAULT_OUTPUT_FILENAME=f'$DEFAULT_OUTPUT_FILENAME.win{window_index}',
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                else:
+                    # if there is only one window, we need to keep the output filename unchanged,
+                    # which does not break the awk script to find the minima
+                    command_str = command_template.safe_substitute(
+                        COLVARS_INPUT_TEMPLATE=os.path.relpath(os.path.abspath(colvars_input_file),
+                        os.path.abspath(generate_basename)).replace('\\', '/'))
+                shell_script.write(command_str)
         if not posixpath.exists(posixpath.join(generate_basename, 'output')):
             os.makedirs(posixpath.join(generate_basename, 'output'))
         self.logger.info(f"Generation of {generate_basename} done.")
